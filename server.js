@@ -430,10 +430,43 @@ app.post('/api/bandwidth/stop', verifyToken, async (req, res) => {
   try {
     const userId = req.userId;
     
+    // Get active session before stopping
+    const activeSession = await BandwidthSession.findOne({ userId, isActive: true });
+    
+    // Update all active sessions to inactive
     await BandwidthSession.updateMany(
       { userId, isActive: true },
       { isActive: false, stoppedAt: new Date() }
     );
+    
+    // If there was an active session, ensure its data is persisted
+    if (activeSession) {
+      // Update statistics for today with final data
+      const today = new Date().toISOString().split('T')[0];
+      const todayStart = new Date(today);
+      todayStart.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(todayStart);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      
+      // Calculate total data shared today
+      const sessionsToday = await BandwidthSession.find({
+        userId,
+        startedAt: { $gte: todayStart, $lt: tomorrow }
+      });
+      
+      const totalDataToday = sessionsToday.reduce((total, session) => {
+        return total + (session.dataShared || 0);
+      }, 0);
+      
+      // Update statistics
+      await Statistics.findOneAndUpdate(
+        { userId, date: today, period: 'daily' },
+        { amount: totalDataToday, $setOnInsert: { userId, date: today, period: 'daily' } },
+        { upsert: true, new: true }
+      );
+      
+      console.log(`Stopped sharing for user ${userId}. Total data today: ${totalDataToday} MB`);
+    }
     
     res.json({
       success: true,
@@ -451,14 +484,35 @@ app.post('/api/bandwidth/stop', verifyToken, async (req, res) => {
 app.get('/api/bandwidth/data-shared', verifyToken, async (req, res) => {
   try {
     const userId = req.userId;
-    const session = await BandwidthSession.findOne({ userId, isActive: true });
     
-    const dataShared = session ? session.dataShared : 0;
+    // Get today's date range (start of day to end of day)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    // Sum all data shared today (both active and inactive sessions)
+    const sessionsToday = await BandwidthSession.find({
+      userId,
+      startedAt: { $gte: today, $lt: tomorrow }
+    });
+    
+    // Calculate total data shared today
+    const dataShared = sessionsToday.reduce((total, session) => {
+      return total + (session.dataShared || 0);
+    }, 0);
+    
+    // Also check active session for real-time data
+    const activeSession = await BandwidthSession.findOne({ userId, isActive: true });
+    const activeData = activeSession ? activeSession.dataShared : 0;
+    
+    // Return the maximum (in case active session has more recent data)
+    const totalDataShared = Math.max(dataShared, activeData);
     
     res.json({
       success: true,
       data: {
-        amount: dataShared, // MB
+        amount: totalDataShared, // MB
       },
     });
   } catch (error) {
