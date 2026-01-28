@@ -244,11 +244,16 @@ app.get('/api/earnings', verifyToken, async (req, res) => {
       await earnings.save();
     }
     
+    const todayEarnings = earnings.today || 0;
+    const totalEarnings = earnings.total || 0;
+    
+    console.log(`Returning earnings for user ${userId}: Today: $${todayEarnings.toFixed(4)}, Total: $${totalEarnings.toFixed(4)}`);
+    
     res.json({
       success: true,
       data: {
-        today: earnings.today || 0,
-        total: earnings.total || 0,
+        today: todayEarnings,
+        total: totalEarnings,
       },
     });
   } catch (error) {
@@ -301,10 +306,15 @@ app.get('/api/statistics', verifyToken, async (req, res) => {
       .select('date amount')
       .lean();
     
+    // If no stats found, return empty array (not null)
+    const statsArray = stats || [];
+    
+    console.log(`Returning ${statsArray.length} ${period} statistics for user ${userId}`);
+    
     res.json({
       success: true,
       data: {
-        [period]: stats || [],
+        [period]: statsArray,
       },
     });
   } catch (error) {
@@ -463,8 +473,10 @@ app.post('/api/bandwidth/update-data', verifyToken, async (req, res) => {
       session.lastUpdated = new Date();
       await session.save();
       
-      // Update earnings based on data shared (example: $0.01 per 100MB = $0.0001 per MB)
-      const earningsPerMB = 0.0001;
+      // Update earnings based on data shared
+      // Rate: $0.10 per 100MB = $0.001 per MB (more visible for testing)
+      // You can adjust this rate as needed
+      const earningsPerMB = 0.001; // $0.001 per MB = $0.10 per 100MB
       const newEarnings = amount * earningsPerMB;
       
       let earnings = await Earnings.findOne({ userId });
@@ -472,12 +484,18 @@ app.post('/api/bandwidth/update-data', verifyToken, async (req, res) => {
         earnings = new Earnings({ userId, today: 0, total: 0 });
       }
       
+      // Only update if new earnings is greater (to handle multiple updates)
+      // Calculate incremental earnings based on difference
       const previousToday = earnings.today || 0;
-      earnings.today = newEarnings;
-      earnings.total = (earnings.total || 0) + (newEarnings - previousToday);
-      earnings.lastUpdated = new Date();
+      const incrementalEarnings = newEarnings - previousToday;
       
-      await earnings.save();
+      if (incrementalEarnings > 0) {
+        earnings.today = newEarnings;
+        earnings.total = (earnings.total || 0) + incrementalEarnings;
+        earnings.lastUpdated = new Date();
+        await earnings.save();
+        console.log(`Updated earnings for user ${userId}: Today: $${earnings.today.toFixed(4)}, Total: $${earnings.total.toFixed(4)}`);
+      }
       
       // Update statistics for today
       const today = new Date().toISOString().split('T')[0];
