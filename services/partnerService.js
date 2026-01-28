@@ -9,6 +9,7 @@ const PartnerRequest = require('../models/PartnerRequest');
 const BandwidthSession = require('../models/BandwidthSession');
 const Earnings = require('../models/Earnings');
 const mongoose = require('mongoose');
+const proxyService = require('./proxyService');
 
 // Platform fee: 30%, User share: 70%
 const PLATFORM_FEE = 0.30;
@@ -44,20 +45,12 @@ const routePartnerRequest = async (partnerId, userId, requestData) => {
       throw new Error('Partner has insufficient balance');
     }
 
-    // Make the actual request (simulated - in production would route through user's IP)
-    const response = await axios({
-      method: requestData.method || 'GET',
-      url: requestData.targetUrl,
-      headers: requestData.headers || {},
-      data: requestData.body ? JSON.parse(requestData.body) : undefined,
-      timeout: 30000,
-    });
+    // Route request through user's IP (via VPN/proxy)
+    // This makes the request appear to come from user's residential IP
+    const response = await proxyService.routeThroughUserIP(userId, requestData, partnerId);
 
-    // Calculate data used (approximate)
-    const requestSize = JSON.stringify(requestData).length;
-    const responseSize = JSON.stringify(response.data).length;
-    const totalBytes = requestSize + responseSize;
-    const dataUsedMB = totalBytes / (1024 * 1024);
+    // Calculate data used
+    const dataUsedMB = proxyService.calculateDataUsage(requestData, response.data);
 
     // Calculate cost based on partner's pricing tier
     const dataUsedGB = dataUsedMB / 1024;
