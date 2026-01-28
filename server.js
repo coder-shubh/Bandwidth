@@ -17,6 +17,13 @@ const Earnings = require('./models/Earnings');
 const Settings = require('./models/Settings');
 const Statistics = require('./models/Statistics');
 const BandwidthSession = require('./models/BandwidthSession');
+const Partner = require('./models/Partner');
+const Payout = require('./models/Payout');
+const PartnerRequest = require('./models/PartnerRequest');
+
+// Import services
+const paymentService = require('./services/paymentService');
+const partnerService = require('./services/partnerService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -474,8 +481,9 @@ app.post('/api/bandwidth/update-data', verifyToken, async (req, res) => {
       await session.save();
       
       // Update earnings based on data shared
-      // Rate: $0.10 per 100MB = $0.001 per MB (more visible for testing)
-      // You can adjust this rate as needed
+      // Note: Real earnings come from partner requests (see partnerService)
+      // This is fallback for monitoring-only mode
+      // Rate: $0.10 per 100MB = $0.001 per MB (for testing/demo)
       const earningsPerMB = 0.001; // $0.001 per MB = $0.10 per 100MB
       const newEarnings = amount * earningsPerMB;
       
@@ -532,4 +540,201 @@ app.listen(PORT, () => {
   console.log(`  POST   /api/bandwidth/stop`);
   console.log(`  GET    /api/bandwidth/data-shared`);
   console.log(`  POST   /api/bandwidth/update-data`);
+  console.log(`\nPartner API endpoints:`);
+  console.log(`  POST   /api/partner/request`);
+  console.log(`  GET    /api/partner/stats`);
+  console.log(`\nPayment endpoints:`);
+  console.log(`  POST   /api/payout/request`);
+  console.log(`  GET    /api/payout/eligibility`);
+  console.log(`  GET    /api/payout/history`);
+});
+
+// Partner API Routes (for companies using the network)
+
+// Verify partner API key middleware
+const verifyPartnerApi = async (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  const apiSecret = req.headers['x-api-secret'];
+  
+  if (!apiKey || !apiSecret) {
+    return res.status(401).json({ success: false, error: 'API key and secret required' });
+  }
+  
+  const partner = await partnerService.verifyPartnerApiKey(apiKey, apiSecret);
+  if (!partner) {
+    return res.status(401).json({ success: false, error: 'Invalid API credentials' });
+  }
+  
+  req.partner = partner;
+  next();
+};
+
+// Partner request endpoint (companies use this to route requests through user IPs)
+app.post('/api/partner/request', verifyPartnerApi, async (req, res) => {
+  try {
+    const { targetUrl, method, headers, body, userId } = req.body;
+    const partner = req.partner;
+    
+    if (!targetUrl) {
+      return res.status(400).json({ success: false, error: 'targetUrl is required' });
+    }
+    
+    // If userId not provided, get an available user
+    let targetUserId = userId;
+    if (!targetUserId) {
+      const availableUsers = await partnerService.getAvailableUsers();
+      if (availableUsers.length === 0) {
+        return res.status(503).json({ success: false, error: 'No users available for routing' });
+      }
+      // Select random user (in production, use load balancing)
+      targetUserId = availableUsers[Math.floor(Math.random() * availableUsers.length)].userId;
+    }
+    
+    const result = await partnerService.routePartnerRequest(
+      partner._id,
+      targetUserId,
+      { targetUrl, method, headers, body }
+    );
+    
+    res.json({
+      success: true,
+      data: result.data,
+      status: result.status,
+      metadata: {
+        dataUsedMB: result.dataUsedMB,
+        cost: result.cost,
+        userEarnings: result.userEarnings,
+      },
+    });
+  } catch (error) {
+    console.error('Partner request error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Partner statistics endpoint
+app.get('/api/partner/stats', verifyPartnerApi, async (req, res) => {
+  try {
+    const partner = req.partner;
+    const startDate = req.query.startDate || new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // Last 30 days
+    const endDate = req.query.endDate || new Date();
+    
+    const stats = await partnerService.getPartnerStats(partner._id, startDate, endDate);
+    
+    res.json({
+      success: true,
+      data: {
+        partner: {
+          name: partner.name,
+          balance: partner.balance,
+          totalUsageGB: partner.totalUsageGB,
+          totalSpent: partner.totalSpent,
+        },
+        period: {
+          startDate,
+          endDate,
+        },
+        statistics: stats,
+      },
+    });
+  } catch (error) {
+    console.error('Partner stats error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Payment/Payout Routes (for users)
+
+// Request payout
+app.post('/api/payout/request', verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const { amount, paymentMethod, paymentDetails } = req.body;
+    
+    // Check eligibility
+    const eligibility = await paymentService.checkPayoutEligibility(userId);
+    if (!eligibility.eligible) {
+      return res.status(400).json({
+        success: false,
+        error: eligibility.message,
+      });
+    }
+    
+    // Validate amount
+    if (amount < 5 || amount > eligibility.amount) {
+      return res.status(400).json({
+        success: false,
+        error: `Amount must be between $5 and $${eligibility.amount.toFixed(2)}`,
+      });
+    }
+    
+    // Validate payment details
+    if (paymentMethod === 'paypal' && !paymentDetails.paypalEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'PayPal email is required',
+      });
+    }
+    
+    // Process payout
+    const result = await paymentService.processUserPayout(
+      userId,
+      amount,
+      paymentMethod,
+      paymentDetails
+    );
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        data: {
+          payoutId: result.payoutId,
+          transactionId: result.transactionId,
+          amount,
+          status: 'processing',
+        },
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: result.error,
+      });
+    }
+  } catch (error) {
+    console.error('Payout request error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Check payout eligibility
+app.get('/api/payout/eligibility', verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const eligibility = await paymentService.checkPayoutEligibility(userId);
+    
+    res.json({
+      success: true,
+      data: eligibility,
+    });
+  } catch (error) {
+    console.error('Payout eligibility error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get payout history
+app.get('/api/payout/history', verifyToken, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const limit = parseInt(req.query.limit) || 10;
+    const history = await paymentService.getPayoutHistory(userId, limit);
+    
+    res.json({
+      success: true,
+      data: history,
+    });
+  } catch (error) {
+    console.error('Payout history error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
 });

@@ -14,7 +14,10 @@
     "jsonwebtoken": "^9.0.2",
     "bcryptjs": "^2.4.3",
     "body-parser": "^1.20.2",
-    "mongoose": "^8.0.0"
+    "mongoose": "^8.0.3",
+    "@paypal/checkout-server-sdk": "^1.0.3",
+    "axios": "^1.6.2",
+    "crypto": "^1.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
